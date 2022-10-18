@@ -340,12 +340,33 @@ func (lc *LocalClient) BugReport(ctx context.Context, note string) (string, erro
 
 // DebugAction invokes a debug action, such as "rebind" or "restun".
 // These are development tools and subject to change or removal over time.
-func (lc *LocalClient) DebugAction(ctx context.Context, action string) error {
-	body, err := lc.send(ctx, "POST", "/localapi/v0/debug?action="+url.QueryEscape(action), 200, nil)
+func (lc *LocalClient) DebugAction(ctx context.Context, action string, args url.Values) error {
+	var urlvals url.Values
+	if args != nil {
+		urlvals, _ = url.ParseQuery(args.Encode())
+	} else {
+		urlvals = make(url.Values)
+	}
+	urlvals.Set("action", action)
+
+	body, err := lc.send(ctx, "POST", "/localapi/v0/debug?"+urlvals.Encode(), 200, nil)
 	if err != nil {
 		return fmt.Errorf("error %w: %s", err, body)
 	}
 	return nil
+}
+
+// TODO: docs
+func (lc *LocalClient) DebugSubnetRoute(ctx context.Context, addr string) (string, error) {
+	urlvals := make(url.Values)
+	urlvals.Set("action", "subnet-route")
+	urlvals.Set("addr", addr)
+
+	body, err := lc.send(ctx, "POST", "/localapi/v0/debug?"+urlvals.Encode(), 200, nil)
+	if err != nil {
+		return "", fmt.Errorf("error %w: %s", err, body)
+	}
+	return string(body), nil
 }
 
 // SetComponentDebugLogging sets component's debug logging enabled for

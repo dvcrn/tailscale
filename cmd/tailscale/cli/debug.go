@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"runtime"
 	"strconv"
@@ -100,13 +101,18 @@ var debugCmd = &ffcli.Command{
 		},
 		{
 			Name:      "restun",
-			Exec:      localAPIAction("restun"),
+			Exec:      localAPIAction("restun", nil),
 			ShortHelp: "force a magicsock restun",
 		},
 		{
 			Name:      "rebind",
-			Exec:      localAPIAction("rebind"),
+			Exec:      localAPIAction("rebind", nil),
 			ShortHelp: "force a magicsock rebind",
+		},
+		{
+			Name:      "subnet-router",
+			Exec:      runDebugSubnetRouter,
+			ShortHelp: "debug connectivity to a host through a subnet router",
 		},
 		{
 			Name:      "prefs",
@@ -298,12 +304,12 @@ func runDERPMap(ctx context.Context, args []string) error {
 	return nil
 }
 
-func localAPIAction(action string) func(context.Context, []string) error {
+func localAPIAction(action string, actionArgs url.Values) func(context.Context, []string) error {
 	return func(ctx context.Context, args []string) error {
 		if len(args) > 0 {
 			return errors.New("unexpected arguments")
 		}
-		return localClient.DebugAction(ctx, action)
+		return localClient.DebugAction(ctx, action, actionArgs)
 	}
 }
 
@@ -544,5 +550,18 @@ func runDebugComponentLogs(ctx context.Context, args []string) error {
 	} else {
 		fmt.Printf("Enabled debug logs for component %q for %v\n", component, dur)
 	}
+	return nil
+}
+
+func runDebugSubnetRouter(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: debug subnet-router <hostname-or-ipv6>")
+	}
+
+	s, err := localClient.DebugSubnetRoute(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Print(s)
 	return nil
 }

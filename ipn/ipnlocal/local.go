@@ -25,6 +25,7 @@ import (
 
 	"go4.org/netipx"
 	"golang.org/x/exp/slices"
+	"golang.org/x/sync/errgroup"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/control/controlclient"
 	"tailscale.com/doctor"
@@ -3722,6 +3723,164 @@ func (b *LocalBackend) DebugReSTUN() error {
 	}
 	mc.ReSTUN("explicit-debug")
 	return nil
+}
+
+func (b *LocalBackend) DebugSubnetRoute(ctx context.Context, addr string) (string, error) {
+	b.mu.Lock()
+	nm := b.netMap
+	b.mu.Unlock()
+
+	if nm == nil {
+		return "", errors.New("no netmap")
+	}
+
+	var (
+		out   strings.Builder
+		outMu sync.Mutex
+	)
+
+	returnWith := func(format string, args ...any) (string, error) {
+		if len(format) > 0 && format[len(format)-1] != '\n' {
+			format += "\n"
+		}
+		fmt.Fprintf(&out, format, args...)
+		return out.String(), nil
+	}
+
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		// Try resolving it
+		// TODO: try with both PreferGo=true and PreferGo=false
+		var resolver net.Resolver
+		ips, err := resolver.LookupNetIP(ctx, "ip", addr)
+		if err != nil {
+			return returnWith("error resolving address %q: %v", addr, err)
+		}
+
+		fmt.Fprintf(&out, "hostname %q resolves to %d addresses: %+v\n", addr, len(ips), ips)
+
+		// Pick the first IP, since we always expect it.
+		// TODO: try all IPs?
+		ip = ips[0]
+	}
+
+	ip = ip.Unmap()
+
+	// The IP address should be an IPv6 address in the 4via6 range
+	if tsaddr.Tailscale4To6Range().Contains(ip) {
+		fmt.Fprintf(&out, "  address %s is in the 4via6 IP range\n", ip)
+	}
+
+	// Try to determine which subnet router is routing this address.
+	fmt.Fprintf(&out, "peers that advertise IP address %s:\n", ip)
+
+	var ns []*tailcfg.Node
+	for _, peer := range nm.Peers {
+		for _, allowedip := range peer.AllowedIPs {
+			if !allowedip.Contains(ip) {
+				continue
+			}
+
+			fmt.Fprintf(&out, "  ID=%v StableID=%v AllowedIP=%v\n", peer.ID, peer.StableID, allowedip)
+			ns = append(ns, peer)
+			break
+		}
+	}
+
+	if len(ns) == 0 {
+		return returnWith("this node has no peers advertising a 4via6 range for %s", ip)
+	}
+
+	// For each possible subnet router, check the status.
+	fmt.Fprintf(&out, "node checks:\n")
+	for _, node := range ns {
+		fmt.Fprintf(&out, "  node %s (%s):\n", node.StableID, node.Name)
+		if node.Online == nil {
+			fmt.Fprintf(&out, "    node has unknown online status\n")
+			continue
+		} else if !*node.Online {
+			fmt.Fprintf(&out, "    node is offline\n")
+			continue
+		} else {
+			fmt.Fprintf(&out, "    node is online\n")
+		}
+
+		// Check PrimaryRoutes
+		for _, pref := range node.PrimaryRoutes {
+			if pref.Contains(ip) {
+				fmt.Fprintf(&out, "    node is a primary router for prefix %s\n", pref)
+			}
+		}
+
+		// Check for exit node
+		if tsaddr.ContainsExitRoutes(node.AllowedIPs) {
+			fmt.Fprintf(&out, "    node is an exit node\n")
+		}
+
+		// Try pinging the node itself
+		// TODO: try all IPs?
+		for _, ty := range []tailcfg.PingType{tailcfg.PingDisco, tailcfg.PingICMP} {
+			pingRes := make(chan *ipnstate.PingResult, 1)
+			b.e.Ping(node.Addresses[0].Addr(), ty, func(pr *ipnstate.PingResult) {
+				select {
+				case pingRes <- pr:
+				default:
+				}
+			})
+			select {
+			case pr := <-pingRes:
+				if pr.Err != "" {
+					fmt.Fprintf(&out, "    ping error: %s\n", pr.Err)
+				} else {
+					fmt.Fprintf(&out, "    got ping response of type %s from node in %.2f seconds\n", ty, pr.LatencySeconds)
+				}
+
+			case <-ctx.Done():
+				return returnWith("error: context canceled: %v", ctx.Err())
+			}
+		}
+	}
+
+	// Try pinging the destination normally
+	fmt.Fprintf(&out, "ICMP connectivity checks:\n")
+	connCtx, connCtxCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer connCtxCancel()
+
+	connGrp, connGrpContext := errgroup.WithContext(connCtx)
+	for _, node := range ns {
+		connGrp.Go(func() error {
+			pingRes := make(chan *ipnstate.PingResult, 1)
+			b.e.PingPeer(ip, node, tailcfg.PingICMP, func(pr *ipnstate.PingResult) {
+				select {
+				case pingRes <- pr:
+				default:
+				}
+			})
+			var res string
+			select {
+			case pr := <-pingRes:
+				if pr.Err != "" {
+					res = fmt.Sprintf("  [%s] ping error: %s\n", node.StableID, pr.Err)
+				} else {
+					res = fmt.Sprintf("  [%s] got ICMP ping response for IP in %.2f seconds\n", node.StableID, pr.LatencySeconds)
+				}
+
+			case <-connGrpContext.Done():
+				res = fmt.Sprintf("  [%s] timeout\n", node.StableID)
+			}
+			outMu.Lock()
+			fmt.Fprint(&out, res)
+			outMu.Unlock()
+			return nil
+		})
+	}
+	if err := connGrp.Wait(); err != nil {
+		return returnWith("error: %v", err)
+	}
+
+	// TODO: try actually opening a TCP connection to see what happens
+
+	return out.String(), nil
 }
 
 func (b *LocalBackend) magicConn() (*magicsock.Conn, error) {

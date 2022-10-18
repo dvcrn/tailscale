@@ -380,12 +380,17 @@ func (h *Handler) serveDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := r.FormValue("action")
-	var err error
+	var (
+		resp string
+		err  error
+	)
 	switch action {
 	case "rebind":
 		err = h.b.DebugRebind()
 	case "restun":
 		err = h.b.DebugReSTUN()
+	case "subnet-route":
+		resp, err = h.b.DebugSubnetRoute(r.Context(), r.FormValue("addr"))
 	case "":
 		err = fmt.Errorf("missing parameter 'action'")
 	default:
@@ -396,7 +401,11 @@ func (h *Handler) serveDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	io.WriteString(w, "done\n")
+	if resp != "" {
+		w.Write([]byte(resp))
+	} else {
+		io.WriteString(w, "done\n")
+	}
 }
 
 func (h *Handler) serveComponentDebugLogging(w http.ResponseWriter, r *http.Request) {
