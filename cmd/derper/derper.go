@@ -147,7 +147,7 @@ func main() {
 
 	if *runSTUN {
 		ss := stunserver.New(ctx)
-		go ss.ListenAndServe(net.JoinHostPort(stunAddr, fmt.Sprint(*stunPort)))
+		go ss.ListenAndServe(net.JoinHostPort(fmt.Sprint(*stunAddr), fmt.Sprint(*stunPort)))
 	}
 
 	cfg := loadConfig()
